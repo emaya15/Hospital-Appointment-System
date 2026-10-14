@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Live Queue Test</title>
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; max-width: 760px; margin: 24px auto; padding: 0 16px; color: #1c2b39; }
+    h1 { font-size: 1.4rem; }
+    label { display: block; margin-top: 12px; font-weight: 600; }
+    input { width: 100%; padding: 8px; box-sizing: border-box; border: 1px solid #b8c4d0; border-radius: 6px; font-family: monospace; }
+    .row { display: flex; gap: 8px; margin-top: 14px; }
+    button { padding: 9px 18px; border: 0; border-radius: 6px; background: #1f4e79; color: #fff; cursor: pointer; font-size: 1rem; }
+    button.secondary { background: #6b7a89; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    #status { margin-top: 14px; font-weight: 600; }
+    #summary { margin-top: 14px; padding: 12px; background: #eaf1f8; border-radius: 6px; display: none; }
+    #log { margin-top: 14px; height: 300px; overflow-y: auto; background: #101820; color: #cde5ff; padding: 10px; border-radius: 6px; font-family: monospace; font-size: .85rem; white-space: pre-wrap; }
+    .note { font-size: .85rem; color: #53626f; }
+  </style>
+</head>
+<body>
+  <h1>Live Queue Test</h1>
+  <p class="note">Log in with <code>POST /auth/login</code>, copy the <b>access_token</b>, then connect here.
+    A patient sees their own queue position; a doctor sees the whole queue.</p>
+
+  <label for="doctorId">Doctor ID</label>
+  <input id="doctorId" type="number" min="1" placeholder="e.g. 1">
+
+  <label for="token">Access token</label>
+  <input id="token" type="text" placeholder="paste the access token here" autocomplete="off">
+
+  <div class="row">
+    <button id="connectBtn">Connect</button>
+    <button id="disconnectBtn" class="secondary" disabled>Disconnect</button>
+    <button id="clearBtn" class="secondary">Clear log</button>
+  </div>
+
+  <div id="status">Status: disconnected</div>
+  <div id="summary"></div>
+  <div id="log" aria-live="polite"></div>
+
+<script>
+  let queueSocket = null;
+  let notifySocket = null;
+  let pingTimer = null;
+
+  const $ = (id) => document.getElementById(id);
+
+  function log(text) {
+    const time = new Date().toLocaleTimeString();
+    $("log").textContent += "[" + time + "] " + text + "\n";
+    $("log").scrollTop = $("log").scrollHeight;
+  }
+
+  function setStatus(text) { $("status").textContent = "Status: " + text; }
+
+  function wsUrl(path, token) {
+    const scheme = location.protocol === "https:" ? "wss://" : "ws://";
+    return scheme + location.host + path + "?token=" + encodeURIComponent(token);
+  }
+
+  function showSummary(m) {
+    const lines = [
+      "Doctor " + m.doctor_id + " - " + m.date,
+      "Now serving token: " + (m.current_token ?? "none"),
+      "Patients waiting: " + m.waiting_count,
+    ];
+    if (m.your_token !== undefined) {
+      lines.push("Your token: " + m.your_token);
+      lines.push("Your position in queue: " + m.your_queue_position);
+      lines.push("Estimated wait: " + m.estimated_wait_minutes + " minutes");
+    }
+    $("summary").style.display = "block";
+    $("summary").innerText = lines.join("\n");
+  }
+
+  function connect() {
+    const doctorId = $("doctorId").value.trim();
+    const token = $("token").value.trim();
+    if (!doctorId || !token) { log("Enter a doctor ID and an access token first."); return; }
+    disconnect(true);
+
+    queueSocket = new WebSocket(wsUrl("/ws/queue/" + encodeURIComponent(doctorId), token));
+    queueSocket.onopen = () => {
+      setStatus("connected to queue of doctor " + doctorId);
+      $("connectBtn").disabled = true;
+      $("disconnectBtn").disabled = false;
+      log("Queue connection opened");
+      pingTimer = setInterval(() => { if (queueSocket.readyState === 1) queueSocket.send("ping"); }, 30000);
+    };
+    queueSocket.onmessage = (event) => {
+      if (event.data === "pong") return;
+      log("QUEUE  " + event.data);
+      try { const m = JSON.parse(event.data); if (m.type === "queue_update") showSummary(m); } catch (e) {}
+    };
+    queueSocket.onclose = (event) => {
+      setStatus("disconnected (code " + event.code + ")");
+      log("Queue connection closed (code " + event.code + (event.code === 1008 ? " - invalid token or doctor" : "") + ")");
+      $("connectBtn").disabled = false;
+      $("disconnectBtn").disabled = true;
+      clearInterval(pingTimer);
+    };
+    queueSocket.onerror = () => log("Queue connection error");
+
+    // Personal notifications use the same token
+    notifySocket = new WebSocket(wsUrl("/ws/notifications", token));
+    notifySocket.onmessage = (event) => { if (event.data !== "pong") log("NOTIFY " + event.data); };
+    notifySocket.onclose = () => log("Notification connection closed");
+  }
+
+  function disconnect(silent) {
+    clearInterval(pingTimer);
+    [queueSocket, notifySocket].forEach((s) => { if (s) { s.onclose = null; s.close(); } });
+    queueSocket = notifySocket = null;
+    $("connectBtn").disabled = false;
+    $("disconnectBtn").disabled = true;
+    if (!silent) { setStatus("disconnected"); log("Disconnected"); }
+  }
+
+  $("connectBtn").addEventListener("click", connect);
+  $("disconnectBtn").addEventListener("click", () => disconnect(false));
+  $("clearBtn").addEventListener("click", () => { $("log").textContent = ""; });
+</script>
+</body>
+</html>
